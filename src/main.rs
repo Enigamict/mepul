@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use image_ref::ImageReference;
 use oci_archive::write_oci_archive;
 use registry::{PlatformSpec, RegistryClient};
-use store::BlobStore;
+use store::{download_and_store, BlobStore};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -67,40 +67,5 @@ async fn main() -> Result<()> {
         "done. loaded into Docker image store; temporary store will be removed from {}",
         store.root().display()
     );
-    Ok(())
-}
-
-async fn download_and_store(
-    client: &RegistryClient,
-    store: &BlobStore,
-    image: &ImageReference,
-    descriptor: &types::Descriptor,
-    label: &str,
-) -> Result<()> {
-    if store.contains_blob(&descriptor.digest).await? {
-        println!("{label}: cached {}", descriptor.digest);
-        return Ok(());
-    }
-
-    println!("{label}: downloading {}", descriptor.digest);
-    let bytes = client
-        .fetch_blob(image, &descriptor.digest)
-        .await
-        .with_context(|| format!("failed to download {label}"))?;
-
-    if bytes.len() as u64 != descriptor.size {
-        anyhow::bail!(
-            "size mismatch for {}: expected {}, got {}",
-            descriptor.digest,
-            descriptor.size,
-            bytes.len()
-        );
-    }
-
-    let path = store
-        .write_blob_verified(&descriptor.digest, &bytes)
-        .await
-        .with_context(|| format!("failed to store {label}"))?;
-    println!("{label}: saved {}", path.display());
     Ok(())
 }

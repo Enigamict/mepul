@@ -74,18 +74,56 @@ mod tests {
     use super::ImageReference;
 
     #[test]
-    fn parses_docker_hub_library_image() {
-        let image = ImageReference::parse("ubuntu:24.04").unwrap();
-        assert_eq!(image.registry, "registry-1.docker.io");
-        assert_eq!(image.repository, "library/ubuntu");
-        assert_eq!(image.reference, "24.04");
+    fn parses_image_references() {
+        for test in [
+            (
+                "docker hub library image with tag",
+                "ubuntu:24.04",
+                "registry-1.docker.io",
+                "library/ubuntu",
+                "24.04",
+            ),
+            (
+                "docker hub library image without tag",
+                "ubuntu",
+                "registry-1.docker.io",
+                "library/ubuntu",
+                "latest",
+            ),
+            (
+                "explicit registry",
+                "ghcr.io/example/app:1.0",
+                "ghcr.io",
+                "example/app",
+                "1.0",
+            ),
+            (
+                "digest reference",
+                "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "registry-1.docker.io",
+                "library/ubuntu",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            (
+                "localhost registry with port",
+                "localhost:5000/example/app:dev",
+                "localhost:5000",
+                "example/app",
+                "dev",
+            ),
+        ] {
+            let (name, input, registry, repository, reference) = test;
+            let image = ImageReference::parse(input).unwrap();
+
+            assert_eq!(image.registry, registry, "{name}: registry");
+            assert_eq!(image.repository, repository, "{name}: repository");
+            assert_eq!(image.reference, reference, "{name}: reference");
+        }
     }
 
     #[test]
-    fn parses_explicit_registry() {
-        let image = ImageReference::parse("ghcr.io/example/app:1.0").unwrap();
-        assert_eq!(image.registry, "ghcr.io");
-        assert_eq!(image.repository, "example/app");
-        assert_eq!(image.reference, "1.0");
+    fn rejects_empty_repository_for_explicit_registry() {
+        let error = ImageReference::parse("ghcr.io").unwrap_err();
+        assert!(error.to_string().contains("repository is empty"));
     }
 }

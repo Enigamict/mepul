@@ -6,6 +6,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 
+use crate::image_ref::ImageReference;
+use crate::registry::RegistryClient;
 use crate::types::Descriptor;
 
 pub struct BlobStore {
@@ -169,6 +171,41 @@ fn verify_digest(expected: &str, bytes: &[u8]) -> Result<()> {
         bail!("digest mismatch: expected {expected}, got sha256:{actual}");
     }
 
+    Ok(())
+}
+
+pub async fn download_and_store(
+    client: &RegistryClient,
+    store: &BlobStore,
+    image: &ImageReference,
+    descriptor: &Descriptor,
+    label: &str,
+) -> Result<()> {
+    if store.contains_blob(&descriptor.digest).await? {
+        println!("{label}: cached {}", descriptor.digest);
+        return Ok(());
+    }
+
+    println!("{label}: downloading {}", descriptor.digest);
+    let bytes = client
+        .fetch_blob(image, &descriptor.digest)
+        .await
+        .with_context(|| format!("failed to download {label}"))?;
+
+    if bytes.len() as u64 != descriptor.size {
+        anyhow::bail!(
+            "size mismatch for {}: expected {}, got {}",
+            descriptor.digest,
+            descriptor.size,
+            bytes.len()
+        );
+    }
+
+    let path = store
+        .write_blob_verified(&descriptor.digest, &bytes)
+        .await
+        .with_context(|| format!("failed to store {label}"))?;
+    println!("{label}: saved {}", path.display());
     Ok(())
 }
 
