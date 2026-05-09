@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -6,6 +7,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 
+use crate::image_ref::ImageReference;
+use crate::registry::{PullPlan, RegistryClient};
 use crate::types::Descriptor;
 
 pub struct BlobStore {
@@ -184,4 +187,72 @@ struct ImageRecord {
 struct ImagePlatform {
     os: String,
     architecture: String,
+}
+
+pub async fn download_blobs(
+    client: &RegistryClient,
+    store: &Arc<BlobStore>,
+    image: &ImageReference,
+    pull: &PullPlan,
+) -> Result<()> {
+    let mut set = tokio::task::JoinSet::new();
+
+    let tasks = std::iter::once((&pull.manifest.config, "config".to_string())).chain(
+        pull.manifest
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l, format!("layer {}", i + 1))),
+    );
+
+    for (descriptor, label) in tasks {
+        let client = client.clone();
+        let store = Arc::clone(store);
+        let image = image.clone();
+        let descriptor = descriptor.clone();
+        set.spawn(async move {
+            download_and_store(&client, &store, &image, &descriptor, &label).await
+        });
+    }
+
+    while let Some(result) = set.join_next().await {
+        result.context("download task panicked")??;
+    }
+
+    Ok(())
+}
+
+async fn download_and_store(
+    client: &RegistryClient,
+    store: &BlobStore,
+    image: &ImageReference,
+    descriptor: &Descriptor,
+    label: &str,
+) -> Result<()> {
+    if store.contains_blob(&descriptor.digest).await? {
+        println!("{label}: cached {}", descriptor.digest);
+        return Ok(());
+    }
+
+    println!("{label}: downloading {}", descriptor.digest);
+    let bytes = client
+        .fetch_blob(image, &descriptor.digest)
+        .await
+        .with_context(|| format!("failed to download {label}"))?;
+
+    if bytes.len() as u64 != descriptor.size {
+        anyhow::bail!(
+            "size mismatch for {}: expected {}, got {}",
+            descriptor.digest,
+            descriptor.size,
+            bytes.len()
+        );
+    }
+
+    let path = store
+        .write_blob_verified(&descriptor.digest, &bytes)
+        .await
+        .with_context(|| format!("failed to store {label}"))?;
+    println!("{label}: saved {}", path.display());
+    Ok(())
 }
