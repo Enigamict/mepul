@@ -5,11 +5,13 @@ mod registry;
 mod store;
 mod types;
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use image_ref::ImageReference;
 use oci_archive::write_oci_archive;
 use registry::{PlatformSpec, RegistryClient};
-use store::BlobStore;
+use store::{download_blobs, BlobStore};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,7 +22,7 @@ async fn main() -> Result<()> {
     }
 
     let image = ImageReference::parse(&args[1])?;
-    let store = BlobStore::temporary().await?;
+    let store = Arc::new(BlobStore::temporary().await?);
     let client = RegistryClient::new()?;
     let platform = PlatformSpec::host_default();
 
@@ -38,10 +40,7 @@ async fn main() -> Result<()> {
         .context("failed to store manifest")?;
     println!("manifest: saved {}", manifest_path.display());
 
-    download_and_store(&client, &store, &image, &pull.manifest.config, "config").await?;
-    for (i, layer) in pull.manifest.layers.iter().enumerate() {
-        download_and_store(&client, &store, &image, layer, &format!("layer {}", i + 1)).await?;
-    }
+    download_blobs(&client, &store, &image, &pull).await?;
 
     let reference_string = image.display_reference();
     store
@@ -70,37 +69,3 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn download_and_store(
-    client: &RegistryClient,
-    store: &BlobStore,
-    image: &ImageReference,
-    descriptor: &types::Descriptor,
-    label: &str,
-) -> Result<()> {
-    if store.contains_blob(&descriptor.digest).await? {
-        println!("{label}: cached {}", descriptor.digest);
-        return Ok(());
-    }
-
-    println!("{label}: downloading {}", descriptor.digest);
-    let bytes = client
-        .fetch_blob(image, &descriptor.digest)
-        .await
-        .with_context(|| format!("failed to download {label}"))?;
-
-    if bytes.len() as u64 != descriptor.size {
-        anyhow::bail!(
-            "size mismatch for {}: expected {}, got {}",
-            descriptor.digest,
-            descriptor.size,
-            bytes.len()
-        );
-    }
-
-    let path = store
-        .write_blob_verified(&descriptor.digest, &bytes)
-        .await
-        .with_context(|| format!("failed to store {label}"))?;
-    println!("{label}: saved {}", path.display());
-    Ok(())
-}
