@@ -44,7 +44,11 @@ async fn main() -> Result<()> {
 
     let reference_string = image.display_reference();
     store
-        .write_manifest_reference(&reference_string, &pull.manifest.digest, &pull.manifest_bytes)
+        .write_manifest_reference(
+            &reference_string,
+            &pull.manifest.digest,
+            &pull.manifest_bytes,
+        )
         .await?;
     let image_record_path = store
         .write_image_record(
@@ -68,4 +72,3 @@ async fn main() -> Result<()> {
     );
     Ok(())
 }
-

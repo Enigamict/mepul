@@ -1,29 +1,35 @@
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
+//use std::io::{BufRead, BufReader, Read, Write};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 const DOCKER_SOCKET: &str = "/var/run/docker.sock";
 
-pub fn load_archive(write_archive: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
+pub async fn load_archive(
+    write_archive: impl FnOnce(&mut dyn AsyncWrite) -> Result<()>,
+) -> Result<()> {
     let mut stream = UnixStream::connect(DOCKER_SOCKET)
+        .await
         .with_context(|| format!("failed to connect to Docker socket {DOCKER_SOCKET}"))?;
-    let request =
-        "POST /images/load?quiet=0 HTTP/1.1\r\n\
+    let request = "POST /images/load?quiet=0 HTTP/1.1\r\n\
          Host: docker\r\n\
          User-Agent: mepul/0.1.0\r\n\
          Content-Type: application/x-tar\r\n\
          Transfer-Encoding: chunked\r\n\
          Connection: close\r\n\
          \r\n";
+
     stream
         .write_all(request.as_bytes())
+        .await
         .context("failed to send Docker load request")?;
     {
         let mut body = ChunkedWriter::new(&mut stream);
         write_archive(&mut body).context("failed to stream archive to Docker")?;
         body.finish()
+            .await
             .context("failed to finish Docker load request body")?;
     }
 
@@ -32,7 +38,11 @@ pub fn load_archive(write_archive: impl FnOnce(&mut dyn Write) -> Result<()>) ->
     if !response.status_success {
         let body = read_body(&mut reader, response.chunked)?;
         let message = String::from_utf8_lossy(&body);
-        anyhow::bail!("Docker load API failed: {} {}", response.status_line, message);
+        anyhow::bail!(
+            "Docker load API failed: {} {}",
+            response.status_line,
+            message
+        );
     }
 
     read_progress(&mut reader, response.chunked)?;
@@ -44,7 +54,7 @@ struct ChunkedWriter<W> {
     finished: bool,
 }
 
-impl<W: Write> ChunkedWriter<W> {
+impl<W: AsyncWrite + std::marker::Unpin> ChunkedWriter<W> {
     fn new(inner: W) -> Self {
         Self {
             inner,
@@ -52,24 +62,42 @@ impl<W: Write> ChunkedWriter<W> {
         }
     }
 
-    fn finish(&mut self) -> std::io::Result<()> {
+    async fn finish(&mut self) -> std::io::Result<()> {
         if !self.finished {
-            self.inner.write_all(b"0\r\n\r\n")?;
+            self.inner.write_all(b"0\r\n\r\n").await?;
             self.finished = true;
         }
-        self.inner.flush()
+        self.inner.flush().await
     }
 }
 
-impl<W: Write> Write for ChunkedWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl<W: AsyncWrite + std::marker::Unpin> AsyncWrite for ChunkedWriter<W> {
+    // async fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    //     if buf.is_empty() {
+    //         return Ok(0);
+    //     }
+
+    //     write!(self.inner, "{:x}\r\n", buf.len())?;
+    //     self.inner.write_all(buf)?;
+    //     self.inner.write_all(b"\r\n")?;
+    //     Ok(buf.len())
+    // }
+
+    async fn write_chunk(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
 
-        write!(self.inner, "{:x}\r\n", buf.len())?;
-        self.inner.write_all(buf)?;
-        self.inner.write_all(b"\r\n")?;
+        // 1. サイズを16進数文字列にして書き込む
+        let header = format!("{:x}\r\n", buf.len());
+        self.inner.write_all(header.as_bytes()).await?;
+
+        // 2. 実際のデータを書き込む
+        self.inner.write_all(buf).await?;
+
+        // 3. チャンクの終端を書き込む
+        self.inner.write_all(b"\r\n").await?;
+
         Ok(buf.len())
     }
 
