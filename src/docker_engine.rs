@@ -4,11 +4,10 @@ use std::os::unix::net::UnixStream;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-const DOCKER_SOCKET: &str = "/var/run/docker.sock";
 
-pub fn load_archive(write_archive: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
-    let mut stream = UnixStream::connect(DOCKER_SOCKET)
-        .with_context(|| format!("failed to connect to Docker socket {DOCKER_SOCKET}"))?;
+pub fn load_archive(docker_socket:&str,write_archive: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
+    let mut stream = UnixStream::connect(docker_socket)
+        .with_context(|| format!("failed to connect to Docker socket {docker_socket}"))?;
     let request =
         "POST /images/load?quiet=0 HTTP/1.1\r\n\
          Host: docker\r\n\

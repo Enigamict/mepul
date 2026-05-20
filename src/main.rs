@@ -6,6 +6,7 @@ mod store;
 mod types;
 
 use std::sync::Arc;
+use clap::Parser;
 
 use anyhow::{Context, Result};
 use image_ref::ImageReference;
@@ -13,15 +14,21 @@ use oci_archive::write_oci_archive;
 use registry::{PlatformSpec, RegistryClient};
 use store::{download_blobs, BlobStore};
 
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+   image:String,
+    #[arg(default_value_t = String::from("/var/run/docker.sock"))]
+   sock:String,
+}
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        eprintln!("usage: mepul <image>");
-        std::process::exit(1);
-    }
-
-    let image = ImageReference::parse(&args[1])?;
+    let args = Args::parse();
+    
+    let image = ImageReference::parse(&args.image)?;
     let store = Arc::new(BlobStore::temporary().await?);
     let client = RegistryClient::new()?;
     let platform = PlatformSpec::host_default();
@@ -59,7 +66,7 @@ async fn main() -> Result<()> {
     println!("image: registered {}", image_record_path.display());
 
     println!("loading into Docker image store...");
-    docker_engine::load_archive(|archive| write_oci_archive(archive, &image, &pull, &store))
+    docker_engine::load_archive(&args.sock,|archive| write_oci_archive(archive, &image, &pull, &store))
         .with_context(|| format!("failed to load archive into Docker image store"))?;
 
     println!(
