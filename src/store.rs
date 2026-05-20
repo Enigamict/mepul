@@ -256,3 +256,54 @@ async fn download_and_store(
     println!("{label}: saved {}", path.display());
     Ok(())
 }
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_digest_success() {
+        let data = b"hello world";
+        let digest = "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
+        let result = verify_digest(digest, data);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_digest_failure() {
+        let data = b"hello world!";
+        let digest = "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
+        let result = verify_digest(digest, data);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_split_digest_success() {
+        let digest = "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
+        let result = split_digest(digest);
+
+        assert_eq!(
+            result.unwrap(),
+            (
+                "sha256",
+                "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            )
+        );
+    }
+
+    #[test]
+    fn test_verify_split_digest_failure() {
+        let invalid_digest = "invalid_digest_without_colon";
+
+        let result = split_digest(invalid_digest);
+
+        assert!(result.is_err()); 
+    }
+}
