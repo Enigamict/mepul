@@ -1,237 +1,79 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio::fs;
+use tokio::task::JoinSet;
 
 use crate::image_ref::ImageReference;
 use crate::registry::{PullPlan, RegistryClient};
 use crate::types::Descriptor;
 
-pub struct BlobStore {
-    root: PathBuf,
-    cleanup_on_drop: bool,
+pub enum BlobSource {
+    CachedFile(PathBuf),
+    Downloaded(Vec<u8>),
 }
 
-impl BlobStore {
-    pub async fn temporary() -> Result<Self> {
-        let base = std::env::temp_dir();
-        let pid = std::process::id();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before UNIX epoch")?
-            .as_nanos();
-
-        for attempt in 0..100 {
-            let root = base.join(format!("mepul-{pid}-{now}-{attempt}"));
-            match fs::create_dir(&root).await {
-                Ok(()) => {
-                    fs::create_dir_all(root.join("blobs")).await?;
-                    fs::create_dir_all(root.join("images")).await?;
-                    fs::create_dir_all(root.join("manifests")).await?;
-                    return Ok(Self {
-                        root,
-                        cleanup_on_drop: true,
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("failed to create temporary store {}", root.display())
-                    });
-                }
-            }
-        }
-
-        bail!("failed to create a unique temporary store directory");
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn blob_path(&self, digest: &str) -> Result<PathBuf> {
-        let (algorithm, encoded) = split_digest(digest)?;
-        Ok(self.root.join("blobs").join(algorithm).join(encoded))
-    }
-
-    pub async fn contains_blob(&self, digest: &str) -> Result<bool> {
-        Ok(fs::try_exists(self.blob_path(digest)?).await?)
-    }
-
-    pub async fn write_blob_verified(&self, digest: &str, bytes: &[u8]) -> Result<PathBuf> {
-        verify_digest(digest, bytes)?;
-        self.write_content(digest, bytes).await
-    }
-
-    pub async fn write_content_verified(&self, digest: &str, bytes: &[u8]) -> Result<PathBuf> {
-        verify_digest(digest, bytes)?;
-        self.write_content(digest, bytes).await
-    }
-
-    pub async fn write_image_record(
-        &self,
-        image_ref: &str,
-        target: &Descriptor,
-        manifest_digest: &str,
-        os: &str,
-        arch: &str,
-    ) -> Result<PathBuf> {
-        let image_path = self
-            .root
-            .join("images")
-            .join(format!("{}.json", sanitize(image_ref)));
-        let record = ImageRecord {
-            name: image_ref.to_string(),
-            target: target.clone(),
-            manifest_digest: manifest_digest.to_string(),
-            platform: ImagePlatform {
-                os: os.to_string(),
-                architecture: arch.to_string(),
-            },
-        };
-        let bytes = serde_json::to_vec_pretty(&record)?;
-        fs::write(&image_path, bytes)
-            .await
-            .with_context(|| format!("failed to write image record {}", image_path.display()))?;
-        Ok(image_path)
-    }
-
-    async fn write_content(&self, digest: &str, bytes: &[u8]) -> Result<PathBuf> {
-        let path = self.blob_path(digest)?;
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        fs::write(&path, bytes)
-            .await
-            .with_context(|| format!("failed to write blob to {}", path.display()))?;
-        Ok(path)
-    }
-
-    pub async fn write_manifest_reference(
-        &self,
-        image_ref: &str,
-        manifest_digest: &str,
-        bytes: &[u8],
-    ) -> Result<PathBuf> {
-        let manifest_path = self.root.join("manifests").join(sanitize(image_ref));
-        fs::write(&manifest_path, bytes).await?;
-
-        let digest_path = self
-            .root
-            .join("manifests")
-            .join(format!("{}.digest", sanitize(image_ref)));
-        fs::write(&digest_path, manifest_digest.as_bytes()).await?;
-        Ok(manifest_path)
-    }
+pub struct ResolvedBlob {
+    pub digest: String,
+    pub source: BlobSource,
 }
 
-impl Drop for BlobStore {
-    fn drop(&mut self) {
-        if self.cleanup_on_drop {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-}
-
-fn split_digest(digest: &str) -> Result<(&str, &str)> {
-    let mut parts = digest.splitn(2, ':');
-    let algorithm = parts.next().unwrap_or_default();
-    let encoded = parts.next().unwrap_or_default();
-
-    if algorithm.is_empty() || encoded.is_empty() {
-        bail!("invalid digest: {digest}");
-    }
-
-    Ok((algorithm, encoded))
-}
-
-fn sanitize(input: &str) -> String {
-    input
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
-            _ => '_',
-        })
-        .collect()
-}
-
-fn verify_digest(expected: &str, bytes: &[u8]) -> Result<()> {
-    let (algorithm, encoded) = split_digest(expected)?;
-    if algorithm != "sha256" {
-        bail!("unsupported digest algorithm: {algorithm}");
-    }
-
-    let actual = format!("{:x}", Sha256::digest(bytes));
-    if actual != encoded {
-        bail!("digest mismatch: expected {expected}, got sha256:{actual}");
-    }
-
-    Ok(())
-}
-
-#[derive(Serialize)]
-struct ImageRecord {
-    name: String,
-    target: Descriptor,
-    manifest_digest: String,
-    platform: ImagePlatform,
-}
-
-#[derive(Serialize)]
-struct ImagePlatform {
-    os: String,
-    architecture: String,
-}
-
-pub async fn download_blobs(
+pub async fn resolve_blobs(
     client: &RegistryClient,
-    store: &Arc<BlobStore>,
     image: &ImageReference,
     pull: &PullPlan,
-) -> Result<()> {
-    let mut set = tokio::task::JoinSet::new();
+) -> Result<(ResolvedBlob, Vec<ResolvedBlob>)> {
+    let total = 1 + pull.manifest.layers.len();
+    let mut set: JoinSet<Result<(usize, ResolvedBlob)>> = JoinSet::new();
 
-    let tasks = std::iter::once((&pull.manifest.config, "config".to_string())).chain(
-        pull.manifest
-            .layers
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (l, format!("layer {}", i + 1))),
-    );
-
-    for (descriptor, label) in tasks {
+    {
         let client = client.clone();
-        let store = Arc::clone(store);
         let image = image.clone();
-        let descriptor = descriptor.clone();
+        let descriptor = pull.manifest.config.clone();
         set.spawn(async move {
-            download_and_store(&client, &store, &image, &descriptor, &label).await
+            let blob = resolve_blob(&client, &image, &descriptor, "config").await?;
+            Ok((0, blob))
         });
     }
 
-    while let Some(result) = set.join_next().await {
-        result.context("download task panicked")??;
+    for (i, descriptor) in pull.manifest.layers.iter().enumerate() {
+        let client = client.clone();
+        let image = image.clone();
+        let descriptor = descriptor.clone();
+        let label = format!("layer {}", i + 1);
+        set.spawn(async move {
+            let blob = resolve_blob(&client, &image, &descriptor, &label).await?;
+            Ok((i + 1, blob))
+        });
     }
 
-    Ok(())
+    let mut results: Vec<Option<ResolvedBlob>> = (0..total).map(|_| None).collect();
+    while let Some(result) = set.join_next().await {
+        let (i, blob) = result.context("resolve task panicked")??;
+        results[i] = Some(blob);
+    }
+
+    let mut iter = results.into_iter().map(Option::unwrap);
+    let config = iter.next().unwrap();
+    let layers = iter.collect();
+
+    Ok((config, layers))
 }
 
-async fn download_and_store(
+async fn resolve_blob(
     client: &RegistryClient,
-    store: &BlobStore,
     image: &ImageReference,
     descriptor: &Descriptor,
     label: &str,
-) -> Result<()> {
-    if store.contains_blob(&descriptor.digest).await? {
-        println!("{label}: cached {}", descriptor.digest);
-        return Ok(());
+) -> Result<ResolvedBlob> {
+    if let Some(path) = cache_blob_path(&descriptor.digest) {
+        if path.exists() {
+            println!("{label}: cached {}", descriptor.digest);
+            return Ok(ResolvedBlob {
+                digest: descriptor.digest.clone(),
+                source: BlobSource::CachedFile(path),
+            });
+        }
     }
 
     println!("{label}: downloading {}", descriptor.digest);
@@ -241,7 +83,7 @@ async fn download_and_store(
         .with_context(|| format!("failed to download {label}"))?;
 
     if bytes.len() as u64 != descriptor.size {
-        anyhow::bail!(
+        bail!(
             "size mismatch for {}: expected {}, got {}",
             descriptor.digest,
             descriptor.size,
@@ -249,10 +91,54 @@ async fn download_and_store(
         );
     }
 
-    let path = store
-        .write_blob_verified(&descriptor.digest, &bytes)
-        .await
-        .with_context(|| format!("failed to store {label}"))?;
-    println!("{label}: saved {}", path.display());
+    verify_digest(&descriptor.digest, &bytes)?;
+
+    if let Some(path) = cache_blob_path(&descriptor.digest) {
+        if let Err(e) = save_to_cache(&path, &bytes).await {
+            eprintln!("warning: failed to save cache for {}: {e}", descriptor.digest);
+        }
+    }
+
+    Ok(ResolvedBlob {
+        digest: descriptor.digest.clone(),
+        source: BlobSource::Downloaded(bytes),
+    })
+}
+
+fn cache_blob_path(digest: &str) -> Option<PathBuf> {
+    let hash = digest.strip_prefix("sha256:")?;
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".cache/mepul/blobs/sha256").join(hash))
+}
+
+async fn save_to_cache(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = path.with_extension("tmp");
+    tokio::fs::write(&tmp, bytes).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+fn split_digest(digest: &str) -> Result<(&str, &str)> {
+    let mut parts = digest.splitn(2, ':');
+    let algorithm = parts.next().unwrap_or_default();
+    let encoded = parts.next().unwrap_or_default();
+    if algorithm.is_empty() || encoded.is_empty() {
+        bail!("invalid digest: {digest}");
+    }
+    Ok((algorithm, encoded))
+}
+
+fn verify_digest(expected: &str, bytes: &[u8]) -> Result<()> {
+    let (algorithm, encoded) = split_digest(expected)?;
+    if algorithm != "sha256" {
+        bail!("unsupported digest algorithm: {algorithm}");
+    }
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if actual != encoded {
+        bail!("digest mismatch: expected {expected}, got sha256:{actual}");
+    }
     Ok(())
 }

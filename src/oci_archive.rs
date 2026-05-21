@@ -7,13 +7,14 @@ use tar::{Builder, Header};
 
 use crate::image_ref::ImageReference;
 use crate::registry::PullPlan;
-use crate::store::BlobStore;
+use crate::store::{BlobSource, ResolvedBlob};
 
 pub fn write_oci_archive<W: Write>(
     writer: W,
     image: &ImageReference,
     plan: &PullPlan,
-    store: &BlobStore,
+    config: &ResolvedBlob,
+    layers: &[ResolvedBlob],
 ) -> Result<()> {
     let mut builder = Builder::new(writer);
 
@@ -43,9 +44,9 @@ pub fn write_oci_archive<W: Write>(
         &plan.manifest_bytes,
     )?;
 
-    append_blob_from_store(&mut builder, store, &plan.manifest.config.digest)?;
-    for layer in &plan.manifest.layers {
-        append_blob_from_store(&mut builder, store, &layer.digest)?;
+    append_blob(&mut builder, config)?;
+    for layer in layers {
+        append_blob(&mut builder, layer)?;
     }
 
     builder
@@ -54,18 +55,20 @@ pub fn write_oci_archive<W: Write>(
     Ok(())
 }
 
-fn append_blob_from_store<W: Write>(
-    builder: &mut Builder<W>,
-    store: &BlobStore,
-    digest: &str,
-) -> Result<()> {
-    let path = store.blob_path(digest)?;
-    let archive_path = blob_archive_path(digest)?;
-    let mut file =
-        File::open(&path).with_context(|| format!("failed to open blob {}", path.display()))?;
-    builder
-        .append_file(&archive_path, &mut file)
-        .with_context(|| format!("failed to append blob {}", path.display()))?;
+fn append_blob<W: Write>(builder: &mut Builder<W>, blob: &ResolvedBlob) -> Result<()> {
+    let archive_path = blob_archive_path(&blob.digest)?;
+    match &blob.source {
+        BlobSource::CachedFile(path) => {
+            let mut file = File::open(path)
+                .with_context(|| format!("failed to open cached blob {}", path.display()))?;
+            builder
+                .append_file(&archive_path, &mut file)
+                .with_context(|| format!("failed to append cached blob {}", path.display()))?;
+        }
+        BlobSource::Downloaded(bytes) => {
+            append_bytes(builder, &archive_path, bytes)?;
+        }
+    }
     Ok(())
 }
 

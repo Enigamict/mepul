@@ -5,14 +5,13 @@ mod registry;
 mod store;
 mod types;
 
-use std::sync::Arc;
 use clap::Parser;
 
 use anyhow::{Context, Result};
 use image_ref::ImageReference;
 use oci_archive::write_oci_archive;
 use registry::{PlatformSpec, RegistryClient};
-use store::{download_blobs, BlobStore};
+use store::resolve_blobs;
 
 
 #[derive(Parser, Debug)]
@@ -29,7 +28,6 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     
     let image = ImageReference::parse(&args.image)?;
-    let store = Arc::new(BlobStore::temporary().await?);
     let client = RegistryClient::new()?;
     let platform = PlatformSpec::host_default();
 
@@ -41,38 +39,15 @@ async fn main() -> Result<()> {
     let pull = client.pull(&image, &platform).await?;
     println!("manifest: {}", pull.manifest.digest);
 
-    let manifest_path = store
-        .write_content_verified(&pull.manifest_descriptor.digest, &pull.manifest_bytes)
-        .await
-        .context("failed to store manifest")?;
-    println!("manifest: saved {}", manifest_path.display());
-
-    download_blobs(&client, &store, &image, &pull).await?;
-
-    let reference_string = image.display_reference();
-    store
-        .write_manifest_reference(&reference_string, &pull.manifest.digest, &pull.manifest_bytes)
-        .await?;
-    let image_record_path = store
-        .write_image_record(
-            &reference_string,
-            &pull.manifest_descriptor,
-            &pull.manifest.digest,
-            &platform.os,
-            &platform.arch,
-        )
-        .await
-        .context("failed to register image")?;
-    println!("image: registered {}", image_record_path.display());
+    let (config, layers) = resolve_blobs(&client, &image, &pull).await?;
 
     println!("loading into Docker image store...");
-    docker_engine::load_archive(&args.sock,|archive| write_oci_archive(archive, &image, &pull, &store))
-        .with_context(|| format!("failed to load archive into Docker image store"))?;
+    docker_engine::load_archive(&args.sock, |archive| {
+        write_oci_archive(archive, &image, &pull, &config, &layers)
+    })
+    .with_context(|| "failed to load archive into Docker image store")?;
 
-    println!(
-        "done. loaded into Docker image store; temporary store will be removed from {}",
-        store.root().display()
-    );
+    println!("done. loaded into Docker image store");
     Ok(())
 }
 
