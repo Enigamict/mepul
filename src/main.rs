@@ -13,6 +13,12 @@ use oci_archive::write_oci_archive;
 use registry::{PlatformSpec, RegistryClient};
 use store::resolve_blobs;
 
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
+use tracing_opentelemetry::OpenTelemetryLayer;
+
 
 
 #[global_allocator]
@@ -27,9 +33,35 @@ struct Args {
    sock:String,
 }
 
+fn init_tracing() -> SdkTracerProvider {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .build()
+        .expect("failed to create OTLP span exporter");
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build();
+
+    let tracer = provider.tracer("mepul");
+    let otel_layer = OpenTelemetryLayer::new(tracer);
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("mepul=trace"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(otel_layer)
+        .with(tracing_subscriber::fmt::layer().compact())
+        .init();
+
+    provider
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let provider = init_tracing();
+
     let args = Args::parse();
     
     let image = ImageReference::parse(&args.image)?;
@@ -53,6 +85,8 @@ async fn main() -> Result<()> {
     .with_context(|| "failed to load archive into Docker image store")?;
 
     println!("done. loaded into Docker image store");
+
+    provider.shutdown().ok();
     Ok(())
 }
 

@@ -9,6 +9,7 @@ use crate::image_ref::ImageReference;
 use crate::registry::PullPlan;
 use crate::store::{BlobSource, ResolvedBlob};
 
+#[tracing::instrument(skip_all, fields(repository = %image.repository, layers = layers.len()))]
 pub fn write_oci_archive<W: Write>(
     writer: W,
     image: &ImageReference,

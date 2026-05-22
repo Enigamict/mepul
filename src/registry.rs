@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, anyhow, bail};
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, WWW_AUTHENTICATE};
+use anyhow::{anyhow, bail, Context, Result};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, WWW_AUTHENTICATE};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 
@@ -30,6 +30,7 @@ impl RegistryClient {
         Ok(Self { client })
     }
 
+    #[tracing::instrument(skip(self), fields(repository = %image.repository, reference = %image.reference))]
     pub async fn pull(
         &self,
         image: &ImageReference,
@@ -44,6 +45,7 @@ impl RegistryClient {
         })
     }
 
+    #[tracing::instrument(skip(self, image), fields(digest = %digest))]
     pub async fn fetch_blob(&self, image: &ImageReference, digest: &str) -> Result<Vec<u8>> {
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
@@ -90,6 +92,7 @@ impl RegistryClient {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(repository = %image.repository, reference = %reference))]
     async fn fetch_manifest_bytes(
         &self,
         image: &ImageReference,
@@ -195,6 +198,7 @@ pub struct ResolvedManifest {
     pub layers: Vec<Descriptor>,
 }
 
+#[derive(Debug)]
 pub struct PlatformSpec<'a> {
     pub os: &'a str,
     pub arch: &'a str,
@@ -283,7 +287,6 @@ impl BearerChallenge {
         })
     }
 }
-
 
 fn header_to_string(headers: &HeaderMap, key: &str) -> Option<String> {
     headers

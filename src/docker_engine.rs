@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 
+#[tracing::instrument(skip(write_archive), fields(socket = %docker_socket))]
 pub fn load_archive(docker_socket:&str,write_archive: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
     let mut stream = UnixStream::connect(docker_socket)
         .with_context(|| format!("failed to connect to Docker socket {docker_socket}"))?;

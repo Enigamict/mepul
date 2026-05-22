@@ -18,6 +18,7 @@ pub struct ResolvedBlob {
     pub source: BlobSource,
 }
 
+#[tracing::instrument(skip_all, fields(total_blobs = 1 + pull.manifest.layers.len()))]
 pub async fn resolve_blobs(
     client: &RegistryClient,
     image: &ImageReference,
@@ -60,6 +61,7 @@ pub async fn resolve_blobs(
     Ok((config, layers))
 }
 
+#[tracing::instrument(skip(client, image), fields(digest = %descriptor.digest, label = %label))]
 async fn resolve_blob(
     client: &RegistryClient,
     image: &ImageReference,
@@ -111,6 +113,7 @@ fn cache_blob_path(digest: &str) -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".cache/mepul/blobs/sha256").join(hash))
 }
 
+#[tracing::instrument(skip(bytes), fields(path = %path.display()))]
 async fn save_to_cache(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -132,6 +135,7 @@ fn split_digest(digest: &str) -> Result<(&str, &str)> {
 }
 
 fn verify_digest(expected: &str, bytes: &[u8]) -> Result<()> {
+    let start = std::time::Instant::now();
     let (algorithm, encoded) = split_digest(expected)?;
     if algorithm != "sha256" {
         bail!("unsupported digest algorithm: {algorithm}");
@@ -140,5 +144,7 @@ fn verify_digest(expected: &str, bytes: &[u8]) -> Result<()> {
     if actual != encoded {
         bail!("digest mismatch: expected {expected}, got sha256:{actual}");
     }
+    let elapsed = start.elapsed();
+    tracing::info!(digest = %expected, cpu_time_ms = elapsed.as_millis() as u64, bytes = bytes.len(), "digest verification complete");
     Ok(())
 }
