@@ -6,12 +6,17 @@ mod store;
 mod types;
 
 use clap::Parser;
-
+use mimalloc::MiMalloc;
 use anyhow::{Context, Result};
 use image_ref::ImageReference;
 use oci_archive::write_oci_archive;
 use registry::{PlatformSpec, RegistryClient};
 use store::resolve_blobs;
+
+
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 
 #[derive(Parser, Debug)]
