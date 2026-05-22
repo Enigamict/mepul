@@ -41,7 +41,7 @@ pub fn write_oci_archive<W: Write>(
     append_bytes(
         &mut builder,
         &blob_archive_path(&plan.manifest_descriptor.digest)?,
-        &plan.manifest_bytes,
+        &plan.manifest.raw_bytes,
     )?;
 
     append_blob(&mut builder, config)?;

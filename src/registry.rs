@@ -40,7 +40,6 @@ impl RegistryClient {
             self.resolve_manifest(image, tag_manifest, platform).await?;
         Ok(PullPlan {
             manifest_descriptor,
-            manifest_bytes: manifest.raw_bytes.clone(),
             manifest,
         })
     }
@@ -186,7 +185,6 @@ impl RegistryClient {
 
 pub struct PullPlan {
     pub manifest_descriptor: Descriptor,
-    pub manifest_bytes: Vec<u8>,
     pub manifest: ResolvedManifest,
 }
 
