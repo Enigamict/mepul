@@ -16,4 +16,4 @@ smol = "2.0.2"
 smol-macros = "0.1.1"
 macro_rules_attribute = "0.2.2"
 futures-util = "0.3"
-surf = { version = "2.3.2", features = ["h1-client-rustls"] }
+surf = { version = "2.3.2", features = ["async-native-tls"] }

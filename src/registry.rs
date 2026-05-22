@@ -61,6 +61,18 @@ impl RegistryClient {
             .get_with_auth(&url, Scope::repository_pull(&image.repository))
             .await?;
 
+        if response.status().is_redirection() {
+            let location = response
+                .header("location")
+                .map(|vals| vals.last().as_str().to_string())
+                .ok_or_else(|| anyhow!("redirect without Location header"))?;
+            response = self
+                .client
+                .get(&location)
+                .await
+                .or_else(|err| bail!("{}", err))?;
+        }
+
         let status = response.status();
         if status.is_client_error() || status.is_server_error() {
             bail!("HTTP Error: {}", status);
