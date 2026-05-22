@@ -33,7 +33,7 @@ impl RegistryClient {
     pub async fn pull(
         &self,
         image: &ImageReference,
-        platform: &PlatformSpec,
+        platform: &PlatformSpec<'_>,
     ) -> Result<PullPlan> {
         let tag_manifest = self.fetch_manifest_bytes(image, &image.reference).await?;
         let (manifest_descriptor, manifest) =
@@ -62,7 +62,7 @@ impl RegistryClient {
         &self,
         image: &ImageReference,
         candidate: ManifestBytes,
-        platform: &PlatformSpec,
+        platform: &PlatformSpec<'_>,
     ) -> Result<(Descriptor, ResolvedManifest)> {
         if is_manifest_list(&candidate.media_type) {
             let index: ImageIndex = serde_json::from_slice(&candidate.bytes)?;
@@ -195,16 +195,16 @@ pub struct ResolvedManifest {
     pub layers: Vec<Descriptor>,
 }
 
-pub struct PlatformSpec {
-    pub os: String,
-    pub arch: String,
+pub struct PlatformSpec<'a> {
+    pub os: &'a str,
+    pub arch: &'a str,
 }
 
-impl PlatformSpec {
+impl PlatformSpec<'_> {
     pub fn host_default() -> Self {
         Self {
-            os: "linux".to_string(),
-            arch: normalize_arch(std::env::consts::ARCH).to_string(),
+            os: "linux",
+            arch: normalize_arch(std::env::consts::ARCH),
         }
     }
 }
@@ -283,6 +283,7 @@ impl BearerChallenge {
         })
     }
 }
+
 
 fn header_to_string(headers: &HeaderMap, key: &str) -> Option<String> {
     headers
