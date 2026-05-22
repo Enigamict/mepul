@@ -9,6 +9,7 @@ use crate::image_ref::ImageReference;
 use crate::registry::PullPlan;
 use crate::store::{BlobSource, ResolvedBlob};
 
+#[tracing::instrument(skip_all, fields(repository = %image.repository, layers = layers.len()))]
 pub fn write_oci_archive<W: Write>(
     writer: W,
     image: &ImageReference,
@@ -41,7 +42,7 @@ pub fn write_oci_archive<W: Write>(
     append_bytes(
         &mut builder,
         &blob_archive_path(&plan.manifest_descriptor.digest)?,
-        &plan.manifest_bytes,
+        &plan.manifest.raw_bytes,
     )?;
 
     append_blob(&mut builder, config)?;

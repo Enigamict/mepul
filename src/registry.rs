@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, anyhow, bail};
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, WWW_AUTHENTICATE};
+use anyhow::{anyhow, bail, Context, Result};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, WWW_AUTHENTICATE};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 
@@ -30,21 +30,22 @@ impl RegistryClient {
         Ok(Self { client })
     }
 
+    #[tracing::instrument(skip(self), fields(repository = %image.repository, reference = %image.reference))]
     pub async fn pull(
         &self,
         image: &ImageReference,
-        platform: &PlatformSpec,
+        platform: &PlatformSpec<'_>,
     ) -> Result<PullPlan> {
         let tag_manifest = self.fetch_manifest_bytes(image, &image.reference).await?;
         let (manifest_descriptor, manifest) =
             self.resolve_manifest(image, tag_manifest, platform).await?;
         Ok(PullPlan {
             manifest_descriptor,
-            manifest_bytes: manifest.raw_bytes.clone(),
             manifest,
         })
     }
 
+    #[tracing::instrument(skip(self, image), fields(digest = %digest))]
     pub async fn fetch_blob(&self, image: &ImageReference, digest: &str) -> Result<Vec<u8>> {
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
@@ -63,7 +64,7 @@ impl RegistryClient {
         &self,
         image: &ImageReference,
         candidate: ManifestBytes,
-        platform: &PlatformSpec,
+        platform: &PlatformSpec<'_>,
     ) -> Result<(Descriptor, ResolvedManifest)> {
         if is_manifest_list(&candidate.media_type) {
             let index: ImageIndex = serde_json::from_slice(&candidate.bytes)?;
@@ -91,6 +92,7 @@ impl RegistryClient {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(repository = %image.repository, reference = %reference))]
     async fn fetch_manifest_bytes(
         &self,
         image: &ImageReference,
@@ -186,7 +188,6 @@ impl RegistryClient {
 
 pub struct PullPlan {
     pub manifest_descriptor: Descriptor,
-    pub manifest_bytes: Vec<u8>,
     pub manifest: ResolvedManifest,
 }
 
@@ -197,16 +198,17 @@ pub struct ResolvedManifest {
     pub layers: Vec<Descriptor>,
 }
 
-pub struct PlatformSpec {
-    pub os: String,
-    pub arch: String,
+#[derive(Debug)]
+pub struct PlatformSpec<'a> {
+    pub os: &'a str,
+    pub arch: &'a str,
 }
 
-impl PlatformSpec {
+impl PlatformSpec<'_> {
     pub fn host_default() -> Self {
         Self {
-            os: "linux".to_string(),
-            arch: normalize_arch(std::env::consts::ARCH).to_string(),
+            os: "linux",
+            arch: normalize_arch(std::env::consts::ARCH),
         }
     }
 }
