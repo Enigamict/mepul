@@ -1,7 +1,7 @@
-use anyhow::{Context, Result, anyhow, bail};
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, WWW_AUTHENTICATE};
-use reqwest::{Client, Response, StatusCode};
+use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
+use surf::middleware::{Middleware, Next};
+use surf::{Client, Request, Response, StatusCode};
 
 use crate::image_ref::ImageReference;
 use crate::types::{Descriptor, ImageIndex, ImageManifest};
@@ -13,6 +13,24 @@ const ACCEPTED_MANIFESTS: &str = concat!(
     "application/vnd.docker.distribution.manifest.v2+json"
 );
 
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Debug, Clone)]
+struct UserAgentMiddleware;
+
+#[surf::utils::async_trait]
+impl Middleware for UserAgentMiddleware {
+    async fn handle(
+        &self,
+        mut req: Request,
+        client: Client,
+        next: Next<'_>,
+    ) -> surf::Result<Response> {
+        req.insert_header("User-Agent", USER_AGENT);
+        next.run(req, client).await
+    }
+}
+
 #[derive(Clone)]
 pub struct RegistryClient {
     client: Client,
@@ -20,21 +38,11 @@ pub struct RegistryClient {
 
 impl RegistryClient {
     pub fn new() -> Result<Self> {
-        let client = Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()?;
+        let client = Client::new().with(UserAgentMiddleware);
         Ok(Self { client })
     }
 
-    pub async fn pull(
-        &self,
-        image: &ImageReference,
-        platform: &PlatformSpec,
-    ) -> Result<PullPlan> {
+    pub async fn pull(&self, image: &ImageReference, platform: &PlatformSpec) -> Result<PullPlan> {
         let tag_manifest = self.fetch_manifest_bytes(image, &image.reference).await?;
         let (manifest_descriptor, manifest) =
             self.resolve_manifest(image, tag_manifest, platform).await?;
@@ -49,13 +57,19 @@ impl RegistryClient {
             "https://{}/v2/{}/blobs/{}",
             image.registry, image.repository, digest
         );
-        let response = self
+        let mut response = self
             .get_with_auth(&url, Scope::repository_pull(&image.repository))
             .await?;
-        let response = response
-            .error_for_status()
-            .with_context(|| format!("blob request failed for {digest}"))?;
-        Ok(response.bytes().await?.to_vec())
+
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            bail!("HTTP Error: {}", status);
+        }
+
+        Ok(response
+            .body_bytes()
+            .await
+            .or_else(|err| bail!("{}", err))?)
     }
 
     async fn resolve_manifest(
@@ -99,25 +113,40 @@ impl RegistryClient {
             "https://{}/v2/{}/manifests/{}",
             image.registry, image.repository, reference
         );
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static(ACCEPTED_MANIFESTS));
 
-        let response = self
-            .get_with_auth_and_headers(&url, Scope::repository_pull(&image.repository), headers)
+        let mut response = self
+            .get_with_auth_and_headers(
+                &url,
+                Scope::repository_pull(&image.repository),
+                vec![("Accept", ACCEPTED_MANIFESTS)],
+            )
             .await?;
-        let response = response
-            .error_for_status()
-            .with_context(|| format!("manifest request failed for {reference}"))?;
 
-        let digest = header_to_string(response.headers(), "docker-content-digest")
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            bail!("HTTP Error: {}", status);
+        }
+
+        let digest = response
+            .header("docker-content-digest")
+            .map(|vals| vals.last().as_str().to_string())
             .ok_or_else(|| anyhow!("missing Docker-Content-Digest header"))?;
         let media_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(';').next().unwrap_or_default().trim().to_string())
+            .header("content-type")
+            .map(|vals| {
+                vals.last()
+                    .as_str()
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
             .unwrap_or_default();
-        let bytes = response.bytes().await?.to_vec();
+        let bytes = response
+            .body_bytes()
+            .await
+            .or_else(|err| bail!("{}", err))?;
 
         Ok(ManifestBytes {
             digest,
@@ -127,36 +156,39 @@ impl RegistryClient {
     }
 
     async fn get_with_auth(&self, url: &str, scope: Scope) -> Result<Response> {
-        self.get_with_auth_and_headers(url, scope, HeaderMap::new())
-            .await
+        self.get_with_auth_and_headers(url, scope, vec![]).await
     }
 
     async fn get_with_auth_and_headers(
         &self,
         url: &str,
         scope: Scope,
-        headers: HeaderMap,
+        headers: Vec<(&str, &str)>,
     ) -> Result<Response> {
-        let initial = self.client.get(url).headers(headers.clone()).send().await?;
-        if initial.status() != StatusCode::UNAUTHORIZED {
+        let mut req = self.client.get(url);
+        for (k, v) in &headers {
+            req = req.header(*k, *v);
+        }
+        let initial = req.await.or_else(|err| bail!("{}", err))?;
+
+        if initial.status() != StatusCode::Unauthorized {
             return Ok(initial);
         }
 
-        let challenge = initial
-            .headers()
-            .get(WWW_AUTHENTICATE)
-            .and_then(|v| v.to_str().ok())
+        let challenge_str = initial
+            .header("WWW-Authenticate")
+            .map(|vals| vals.last().as_str().to_string())
             .ok_or_else(|| anyhow!("missing WWW-Authenticate header"))?;
-        let bearer = BearerChallenge::parse(challenge)?;
+        let bearer = BearerChallenge::parse(&challenge_str)?;
         let token = self.fetch_bearer_token(&bearer, &scope).await?;
 
-        let mut retried_headers = headers;
-        retried_headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))?,
-        );
+        let mut retried = self.client.get(url);
+        for (k, v) in &headers {
+            retried = retried.header(*k, *v);
+        }
+        retried = retried.header("Authorization", format!("Bearer {token}"));
 
-        Ok(self.client.get(url).headers(retried_headers).send().await?)
+        Ok(retried.await.or_else(|err| bail!("{}", err))?)
     }
 
     async fn fetch_bearer_token(
@@ -164,17 +196,23 @@ impl RegistryClient {
         challenge: &BearerChallenge,
         scope: &Scope,
     ) -> Result<String> {
-        let mut request = self.client.get(&challenge.realm).query(&[
-            ("service", challenge.service.as_str()),
-            ("scope", scope.as_str()),
-        ]);
+        let mut url =
+            surf::Url::parse(&challenge.realm).map_err(|e| anyhow!("invalid realm URL: {}", e))?;
+        url.query_pairs_mut()
+            .append_pair("service", &challenge.service)
+            .append_pair("scope", scope.as_str());
 
         if let Some(extra_scope) = challenge.scope.as_deref() {
-            request = request.query(&[("scope", extra_scope)]);
+            url.query_pairs_mut().append_pair("scope", extra_scope);
         }
 
-        let response = request.send().await?.error_for_status()?;
-        let token: TokenResponse = response.json().await?;
+        let mut response = self.client.get(url).await.or_else(|err| bail!("{}", err))?;
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            bail!("HTTP Error: {}", status);
+        }
+
+        let token: TokenResponse = response.body_json().await.or_else(|err| bail!("{}", err))?;
 
         token
             .token
@@ -282,13 +320,6 @@ impl BearerChallenge {
             scope,
         })
     }
-}
-
-fn header_to_string(headers: &HeaderMap, key: &str) -> Option<String> {
-    headers
-        .get(key)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
 }
 
 fn is_manifest_list(media_type: &str) -> bool {
