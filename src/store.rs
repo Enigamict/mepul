@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
-use tokio::task::JoinSet;
+//use tokio::task::JoinSet;
 
 use crate::image_ref::ImageReference;
+use crate::joinset::JoinSet;
 use crate::registry::{PullPlan, RegistryClient};
 use crate::types::Descriptor;
 
@@ -49,7 +50,7 @@ pub async fn resolve_blobs(
 
     let mut results: Vec<Option<ResolvedBlob>> = (0..total).map(|_| None).collect();
     while let Some(result) = set.join_next().await {
-        let (i, blob) = result.context("resolve task panicked")??;
+        let (i, blob) = result.context("resolve task panicked")?;
         results[i] = Some(blob);
     }
 
@@ -95,7 +96,10 @@ async fn resolve_blob(
 
     if let Some(path) = cache_blob_path(&descriptor.digest) {
         if let Err(e) = save_to_cache(&path, &bytes).await {
-            eprintln!("warning: failed to save cache for {}: {e}", descriptor.digest);
+            eprintln!(
+                "warning: failed to save cache for {}: {e}",
+                descriptor.digest
+            );
         }
     }
 
@@ -108,16 +112,20 @@ async fn resolve_blob(
 fn cache_blob_path(digest: &str) -> Option<PathBuf> {
     let hash = digest.strip_prefix("sha256:")?;
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".cache/mepul/blobs/sha256").join(hash))
+    Some(
+        PathBuf::from(home)
+            .join(".cache/mepul/blobs/sha256")
+            .join(hash),
+    )
 }
 
 async fn save_to_cache(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        smol::fs::create_dir_all(parent).await?;
     }
     let tmp = path.with_extension("tmp");
-    tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, path).await?;
+    smol::fs::write(&tmp, bytes).await?;
+    smol::fs::rename(&tmp, path).await?;
     Ok(())
 }
 

@@ -4,8 +4,12 @@ mod oci_archive;
 mod registry;
 mod store;
 mod types;
+mod joinset;
 
 use clap::Parser;
+use macro_rules_attribute::apply;
+use smol_macros::main;
+
 
 use anyhow::{Context, Result};
 use image_ref::ImageReference;
@@ -22,8 +26,7 @@ struct Args {
    sock:String,
 }
 
-
-#[tokio::main]
+#[apply(main!)]
 async fn main() -> Result<()> {
     let args = Args::parse();
     
