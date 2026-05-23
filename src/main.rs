@@ -4,6 +4,7 @@ mod oci_archive;
 mod registry;
 mod store;
 mod types;
+mod download;
 
 use clap::Parser;
 
