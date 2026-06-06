@@ -4,12 +4,13 @@ use std::os::unix::net::UnixStream;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-
-pub fn load_archive(docker_socket:&str,write_archive: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
+pub fn load_archive(
+    docker_socket: &str,
+    write_archive: impl FnOnce(&mut dyn Write) -> Result<()>,
+) -> Result<()> {
     let mut stream = UnixStream::connect(docker_socket)
         .with_context(|| format!("failed to connect to Docker socket {docker_socket}"))?;
-    let request =
-        "POST /images/load?quiet=0 HTTP/1.1\r\n\
+    let request = "POST /images/load?quiet=0 HTTP/1.1\r\n\
          Host: docker\r\n\
          User-Agent: mepul/0.1.0\r\n\
          Content-Type: application/x-tar\r\n\
@@ -31,7 +32,11 @@ pub fn load_archive(docker_socket:&str,write_archive: impl FnOnce(&mut dyn Write
     if !response.status_success {
         let body = read_body(&mut reader, response.chunked)?;
         let message = String::from_utf8_lossy(&body);
-        anyhow::bail!("Docker load API failed: {} {}", response.status_line, message);
+        anyhow::bail!(
+            "Docker load API failed: {} {}",
+            response.status_line,
+            message
+        );
     }
 
     read_progress(&mut reader, response.chunked)?;
@@ -215,4 +220,43 @@ struct ResponseHead {
     status_line: String,
     status_success: bool,
     chunked: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{print_complete_json_lines, print_progress_line, ChunkedWriter};
+    use std::io::Write;
+
+    #[test]
+    fn chunked_writer_formats_single_chunk_correctly() {
+        let mut output = Vec::new();
+        let mut w = ChunkedWriter::new(&mut output);
+
+        w.write_all(b"hello").unwrap();
+        w.finish().unwrap();
+
+        assert_eq!(output, b"5\r\nhello\r\n0\r\n\r\n");
+    }
+
+    #[test]
+    fn print_progress_line_stream_field_is_ok() {
+        let line = br#"{"stream":"Loaded image: ubuntu:24.04\n"}"#;
+
+        let result = print_progress_line(line);
+
+        assert!(result.is_ok());
+    }
+
+
+    #[test]
+    fn print_complete_json_lines_drains_complete_lines_from_buffer() {
+        let mut buffer = br#"{"stream":"hello\n"}"#.to_vec();
+        buffer.push(b'\n');
+        buffer.extend_from_slice(br#"{"stream":"incomplete"}"#);
+
+        let result = print_complete_json_lines(&mut buffer);
+
+        assert!(result.is_ok());
+        assert_eq!(buffer, br#"{"stream":"incomplete"}"#);
+    }
 }

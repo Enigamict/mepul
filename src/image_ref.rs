@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 #[derive(Debug, Clone)]
 pub struct ImageReference {
@@ -75,7 +75,10 @@ mod tests {
 
     #[test]
     fn parses_docker_hub_library_image() {
-        let image = ImageReference::parse("ubuntu:24.04").unwrap();
+        let input = "ubuntu:24.04";
+
+        let image = ImageReference::parse(input).unwrap();
+
         assert_eq!(image.registry, "registry-1.docker.io");
         assert_eq!(image.repository, "library/ubuntu");
         assert_eq!(image.reference, "24.04");
@@ -83,9 +86,21 @@ mod tests {
 
     #[test]
     fn parses_explicit_registry() {
-        let image = ImageReference::parse("ghcr.io/example/app:1.0").unwrap();
+        let input = "ghcr.io/example/app:1.0";
+
+        let image = ImageReference::parse(input).unwrap();
+
         assert_eq!(image.registry, "ghcr.io");
         assert_eq!(image.repository, "example/app");
         assert_eq!(image.reference, "1.0");
+    }
+
+    #[test]
+    fn display_reference_formats_correctly() {
+        let image = ImageReference::parse("ubuntu:24.04").unwrap();
+
+        let display = image.display_reference();
+
+        assert_eq!(display, "registry-1.docker.io/library/ubuntu:24.04");
     }
 }

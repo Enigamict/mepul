@@ -49,9 +49,7 @@ pub fn write_oci_archive<W: Write>(
         append_blob(&mut builder, layer)?;
     }
 
-    builder
-        .finish()
-        .context("failed to finish OCI archive")?;
+    builder.finish().context("failed to finish OCI archive")?;
     Ok(())
 }
 
@@ -122,4 +120,151 @@ struct IndexEntry {
 struct ImageAnnotations {
     #[serde(rename = "org.opencontainers.image.ref.name")]
     ref_name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_oci_archive;
+    use crate::image_ref::ImageReference;
+    use crate::registry::{PullPlan, ResolvedManifest};
+    use crate::store::{BlobSource, ResolvedBlob};
+    use crate::types::Descriptor;
+
+    fn descriptor(media_type: &str, digest: &str, size: u64) -> Descriptor {
+        Descriptor {
+            media_type: media_type.to_string(),
+            digest: digest.to_string(),
+            size,
+        }
+    }
+
+    fn test_make_plan(manifest_bytes: &[u8]) -> PullPlan {
+        PullPlan {
+            manifest_descriptor: descriptor(
+                "application/vnd.oci.image.manifest.v1+json",
+                "sha256:aaaa",
+                manifest_bytes.len() as u64,
+            ),
+            manifest_bytes: manifest_bytes.to_vec(),
+            manifest: ResolvedManifest {
+                digest: "sha256:aaaa".to_string(),
+                raw_bytes: manifest_bytes.to_vec(),
+                config: descriptor("application/vnd.oci.image.config.v1+json", "sha256:bbbb", 2),
+                layers: vec![descriptor(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "sha256:cccc",
+                    5,
+                )],
+            },
+        }
+    }
+
+    fn tar_entry_content(tar_bytes: &[u8], name: &str) -> Option<Vec<u8>> {
+        let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().to_string_lossy() == name {
+                let mut content = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut content).unwrap();
+                return Some(content);
+            }
+        }
+        None
+    }
+
+    fn tar_entry_paths(tar_bytes: &[u8]) -> Vec<String> {
+        let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn write_oci_archive_produces_valid_tar_with_required_entries() {
+        let image = ImageReference::parse("ubuntu:24.04").unwrap();
+        let plan = test_make_plan(b"{}");
+        let config = ResolvedBlob {
+            digest: "sha256:bbbb".to_string(),
+            source: BlobSource::Downloaded(b"{}".to_vec()),
+        };
+        let layer = ResolvedBlob {
+            digest: "sha256:cccc".to_string(),
+            source: BlobSource::Downloaded(b"layer".to_vec()),
+        };
+
+        let mut output = Vec::new();
+        write_oci_archive(&mut output, &image, &plan, &config, &[layer]).unwrap();
+
+        let paths = tar_entry_paths(&output);
+        assert!(paths.contains(&"oci-layout".to_string()));
+        assert!(paths.contains(&"index.json".to_string()));
+        assert!(paths.contains(&"blobs/sha256/aaaa".to_string()));
+        assert!(paths.contains(&"blobs/sha256/bbbb".to_string()));
+        assert!(paths.contains(&"blobs/sha256/cccc".to_string()));
+    }
+
+    #[test]
+    fn write_oci_archive_oci_layout_has_correct_content() {
+        let image = ImageReference::parse("ubuntu:24.04").unwrap();
+        let plan = test_make_plan(b"{}");
+        let config = ResolvedBlob {
+            digest: "sha256:bbbb".to_string(),
+            source: BlobSource::Downloaded(b"{}".to_vec()),
+        };
+
+        let mut output = Vec::new();
+        write_oci_archive(&mut output, &image, &plan, &config, &[]).unwrap();
+
+        let content = tar_entry_content(&output, "oci-layout").expect("oci-layout not found");
+        let v: serde_json::Value = serde_json::from_slice(&content).unwrap();
+        assert_eq!(v["imageLayoutVersion"], "1.0.0");
+    }
+
+    #[test]
+    fn write_oci_archive_index_contains_image_ref_annotation() {
+        let image = ImageReference::parse("ghcr.io/example/app:v1").unwrap();
+        let plan = test_make_plan(b"{}");
+        let config = ResolvedBlob {
+            digest: "sha256:bbbb".to_string(),
+            source: BlobSource::Downloaded(b"{}".to_vec()),
+        };
+
+        let mut output = Vec::new();
+        write_oci_archive(&mut output, &image, &plan, &config, &[]).unwrap();
+
+        let content = tar_entry_content(&output, "index.json").expect("index.json not found");
+        let v: serde_json::Value = serde_json::from_slice(&content).unwrap();
+        let ref_name = &v["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"];
+        assert_eq!(ref_name, "ghcr.io/example/app:v1");
+    }
+
+    #[test]
+    fn blob_archive_path_errors_on_invalid_digest() {
+        let image = ImageReference::parse("ubuntu:24.04").unwrap();
+        let plan = PullPlan {
+            manifest_descriptor: descriptor(
+                "application/vnd.oci.image.manifest.v1+json",
+                "invalid-no-colon",
+                0,
+            ),
+            manifest_bytes: b"{}".to_vec(),
+            manifest: ResolvedManifest {
+                digest: "invalid-no-colon".to_string(),
+                raw_bytes: b"{}".to_vec(),
+                config: descriptor("", "sha256:bbbb", 0),
+                layers: vec![],
+            },
+        };
+        let config = ResolvedBlob {
+            digest: "sha256:bbbb".to_string(),
+            source: BlobSource::Downloaded(vec![]),
+        };
+
+        let mut output = Vec::new();
+        let result = write_oci_archive(&mut output, &image, &plan, &config, &[]);
+
+        assert!(result.is_err());
+    }
 }

@@ -13,20 +13,18 @@ use oci_archive::write_oci_archive;
 use registry::{PlatformSpec, RegistryClient};
 use store::resolve_blobs;
 
-
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-   image:String,
+    image: String,
     #[arg(default_value_t = String::from("/var/run/docker.sock"))]
-   sock:String,
+    sock: String,
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    
+
     let image = ImageReference::parse(&args.image)?;
     let client = RegistryClient::new()?;
     let platform = PlatformSpec::host_default();
@@ -50,4 +48,3 @@ async fn main() -> Result<()> {
     println!("done. loaded into Docker image store");
     Ok(())
 }
-
