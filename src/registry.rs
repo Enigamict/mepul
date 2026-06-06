@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, anyhow, bail};
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, WWW_AUTHENTICATE};
+use anyhow::{anyhow, bail, Context, Result};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, WWW_AUTHENTICATE};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 
@@ -30,11 +30,7 @@ impl RegistryClient {
         Ok(Self { client })
     }
 
-    pub async fn pull(
-        &self,
-        image: &ImageReference,
-        platform: &PlatformSpec,
-    ) -> Result<PullPlan> {
+    pub async fn pull(&self, image: &ImageReference, platform: &PlatformSpec) -> Result<PullPlan> {
         let tag_manifest = self.fetch_manifest_bytes(image, &image.reference).await?;
         let (manifest_descriptor, manifest) =
             self.resolve_manifest(image, tag_manifest, platform).await?;
@@ -309,4 +305,64 @@ fn decode_manifest(candidate: ManifestBytes) -> Result<ResolvedManifest> {
         config: manifest.config,
         layers: manifest.layers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{header_to_string, is_manifest_list, normalize_arch, BearerChallenge};
+    use reqwest::header::HeaderMap;
+
+    #[test]
+    fn normalize_arch_maps_x86_64_to_amd64() {
+        let result = normalize_arch("x86_64");
+
+        assert_eq!(result, "amd64");
+    }
+
+    #[test]
+    fn normalize_arch_maps_aarch64_to_arm64() {
+        let result = normalize_arch("aarch64");
+
+        assert_eq!(result, "arm64");
+    }
+
+    #[test]
+    fn normalize_arch_passes_through_unknown() {
+        let riscv = normalize_arch("riscv64");
+        let s390x = normalize_arch("s390x");
+
+        assert_eq!(riscv, "riscv64");
+        assert_eq!(s390x, "s390x");
+    }
+
+    #[test]
+    fn oci_image_index_is_manifest_list() {
+        let result = is_manifest_list("application/vnd.oci.image.index.v1+json");
+
+        assert!(result);
+    }
+
+    #[test]
+    fn bearer_challenge_parses_realm_service_and_scope() {
+        let header = concat!(
+            r#"Bearer realm="https://auth.docker.io/token","#,
+            r#"service="registry.docker.io","#,
+            r#"scope="repository:library/ubuntu:pull""#
+        );
+
+        let c = BearerChallenge::parse(header).unwrap();
+
+        assert_eq!(c.realm, "https://auth.docker.io/token");
+        assert_eq!(c.service, "registry.docker.io");
+        assert_eq!(c.scope.as_deref(), Some("repository:library/ubuntu:pull"));
+    }
+
+    #[test]
+    fn header_to_string_returns_none_when_key_missing() {
+        let headers = HeaderMap::new();
+
+        let result = header_to_string(&headers, "docker-content-digest");
+
+        assert!(result.is_none());
+    }
 }
