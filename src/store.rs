@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 
+use crate::filecache::cache_home;
 use crate::image_ref::ImageReference;
 use crate::registry::{PullPlan, RegistryClient};
 use crate::types::Descriptor;
@@ -108,14 +109,16 @@ async fn resolve_blob(
     })
 }
 
+/// Where a layer blob is cached.
+///
+/// This goes through `cache_home` rather than reading `HOME` directly so that
+/// the blob cache lands beside the file cache and the profiles. Splitting them
+/// would quietly break the one measurement the design rests on: clearing the
+/// cache to force a cold run would leave the layer blobs behind, and the "cold"
+/// number would really be a warm download.
 fn cache_blob_path(digest: &str) -> Option<PathBuf> {
     let hash = digest.strip_prefix("sha256:")?;
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(".cache/mepul/blobs/sha256")
-            .join(hash),
-    )
+    Some(cache_home().ok()?.join("blobs/sha256").join(hash))
 }
 
 async fn save_to_cache(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -192,16 +195,19 @@ mod tests {
     }
 
     #[test]
-    fn cache_blob_path_returns_path_under_home_cache() {
-        std::env::set_var("HOME", "/tmp/testhome");
+    fn cache_blob_path_sits_beside_the_rest_of_the_cache() {
+        // Blobs, files and profiles have to share a root, or clearing the cache
+        // for a cold measurement would miss the blobs.
+        std::env::set_var("MEPUL_CACHE_DIR", "/tmp/testcache");
         let digest = "sha256:abcdef123";
 
         let path = cache_blob_path(digest).unwrap();
 
         assert_eq!(
             path.to_string_lossy(),
-            "/tmp/testhome/.cache/mepul/blobs/sha256/abcdef123"
+            "/tmp/testcache/blobs/sha256/abcdef123"
         );
+        std::env::remove_var("MEPUL_CACHE_DIR");
     }
 
     #[tokio::test]
